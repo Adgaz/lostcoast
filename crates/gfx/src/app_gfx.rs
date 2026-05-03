@@ -1,15 +1,19 @@
 use anyhow::{Context, Result};
 use ash::vk;
+use glam::{Mat4, Vec3};
 use lostcoast_core::scene::Scene;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
+use crate::camera::{perspective, view};
 use crate::device::{create_for_surface, Device};
 use crate::instance::{create as create_instance, Instance, InstanceConfig};
 use crate::pipeline::{TrianglePipeline, TrianglePush};
 use crate::swapchain::{self, Swapchain};
 use crate::sync::{create_frame_sync, destroy_frame_sync, FrameSync};
+use crate::world_pass::{DepthTarget, WorldResources};
 
 const FRAMES_IN_FLIGHT: usize = 2;
+const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 pub struct AppGfx {
     instance: Instance,
@@ -22,9 +26,13 @@ pub struct AppGfx {
     frame_syncs: Vec<FrameSync>,
     image_render_done: Vec<vk::Semaphore>,
     triangle: Option<TrianglePipeline>,
-    triangle_format: vk::Format,
+    world: Option<WorldResources>,
+    depth: Option<DepthTarget>,
+    pipeline_format: vk::Format,
     frame_idx: usize,
     extent: (u32, u32),
+    pub camera_pos: Vec3,
+    pub camera_target: Vec3,
 }
 
 impl AppGfx {
@@ -95,7 +103,7 @@ impl AppGfx {
             image_render_done.push(sem);
         }
 
-        let triangle_format = swapchain.format;
+        let pipeline_format = swapchain.format;
 
         Ok(AppGfx {
             instance,
@@ -108,9 +116,13 @@ impl AppGfx {
             frame_syncs,
             image_render_done,
             triangle: None,
-            triangle_format,
+            world: None,
+            depth: None,
+            pipeline_format,
             frame_idx: 0,
             extent: size,
+            camera_pos: Vec3::new(3.0, 3.0, 3.0),
+            camera_target: Vec3::ZERO,
         })
     }
 
@@ -148,29 +160,57 @@ impl AppGfx {
             .context("create render-done semaphore")?;
             self.image_render_done.push(sem);
         }
-        if new.format != self.triangle_format {
+        if new.format != self.pipeline_format {
             if let Some(tp) = self.triangle.take() {
                 tp.destroy(&self.device.raw);
             }
-            self.triangle_format = new.format;
+            if let Some(w) = self.world.take() {
+                w.destroy(&self.device);
+            }
+            self.pipeline_format = new.format;
+        }
+        if let Some(d) = self.depth.take() {
+            d.destroy(&self.device);
         }
         self.swapchain = Some(new);
         Ok(())
     }
 
-    fn ensure_pipeline(&mut self, scene: &Scene) -> Result<()> {
-        let needs = matches!(scene, Scene::Triangle { .. } | Scene::Cube { .. });
-        if needs && self.triangle.is_none() {
-            self.triangle = Some(TrianglePipeline::new(
-                &self.device.raw,
-                self.triangle_format,
-            )?);
+    fn ensure_resources(&mut self, scene: &Scene) -> Result<()> {
+        match scene {
+            Scene::Triangle { .. } => {
+                if self.triangle.is_none() {
+                    self.triangle = Some(TrianglePipeline::new(
+                        &self.device.raw,
+                        self.pipeline_format,
+                    )?);
+                }
+            }
+            Scene::Cube { .. } => {
+                if self.world.is_none() {
+                    self.world = Some(WorldResources::create(
+                        &self.device,
+                        self.cmd_pool,
+                        self.pipeline_format,
+                        DEPTH_FORMAT,
+                        FRAMES_IN_FLIGHT as u32,
+                    )?);
+                }
+                if self.depth.is_none() {
+                    self.depth = Some(DepthTarget::create(
+                        &self.device,
+                        self.extent.0,
+                        self.extent.1,
+                    )?);
+                }
+            }
+            Scene::Clear { .. } => {}
         }
         Ok(())
     }
 
     pub fn render(&mut self, scene: &Scene, t: f32) -> Result<()> {
-        self.ensure_pipeline(scene)?;
+        self.ensure_resources(scene)?;
 
         let frame = self.frame_idx % FRAMES_IN_FLIGHT;
         let in_flight = self.frame_syncs[frame].in_flight;
@@ -211,6 +251,13 @@ impl AppGfx {
                 .context("reset command buffer")?;
         }
 
+        if let Some(w) = &self.world {
+            let aspect = self.extent.0 as f32 / self.extent.1.max(1) as f32;
+            let view_proj = perspective(aspect) * view(self.camera_pos, self.camera_target);
+            let model = Mat4::from_rotation_y(t * 0.5);
+            w.update_globals(&self.device, frame, view_proj, model)?;
+        }
+
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe { self.device.raw.begin_command_buffer(cmd, &begin) }
@@ -220,15 +267,18 @@ impl AppGfx {
             let sc = self.swapchain.as_ref().unwrap();
             (sc.images[image_idx], sc.image_views[image_idx], sc.extent)
         };
-        let color = cycled_color(scene, t);
+        let cycled = cycled_color(scene, t);
         record_pass(
             &self.device.raw,
             cmd,
             image,
             view,
             extent,
-            color,
+            cycled,
             self.triangle.as_ref(),
+            self.world.as_ref(),
+            self.depth.as_ref(),
+            frame,
         );
 
         unsafe { self.device.raw.end_command_buffer(cmd) }.context("end command buffer")?;
@@ -285,6 +335,7 @@ fn cycled_color(scene: &Scene, t: f32) -> [f32; 4] {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_pass(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -293,11 +344,15 @@ fn record_pass(
     extent: vk::Extent2D,
     clear: [f32; 4],
     triangle: Option<&TrianglePipeline>,
+    world: Option<&WorldResources>,
+    depth: Option<&DepthTarget>,
+    frame_idx: usize,
 ) {
     image_barrier(
         device,
         cmd,
         image,
+        vk::ImageAspectFlags::COLOR,
         vk::ImageLayout::UNDEFINED,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -306,57 +361,77 @@ fn record_pass(
         vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
     );
 
-    let clear_value = vk::ClearValue {
-        color: vk::ClearColorValue { float32: clear },
-    };
-    let attachment = vk::RenderingAttachmentInfo::default()
-        .image_view(view)
-        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .clear_value(clear_value);
-    let render_area = vk::Rect2D {
-        offset: vk::Offset2D { x: 0, y: 0 },
-        extent,
-    };
-    let rendering = vk::RenderingInfo::default()
-        .render_area(render_area)
-        .layer_count(1)
-        .color_attachments(std::slice::from_ref(&attachment));
+    if let Some(d) = depth {
+        image_barrier(
+            device,
+            cmd,
+            d.image,
+            vk::ImageAspectFlags::DEPTH,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::AccessFlags::empty(),
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        );
+    }
 
-    unsafe {
-        device.cmd_begin_rendering(cmd, &rendering);
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
+    if let (Some(w), Some(d)) = (world, depth) {
+        w.record_pass(device, cmd, view, d.view, extent, clear, frame_idx);
+    } else {
+        let clear_value = vk::ClearValue {
+            color: vk::ClearColorValue { float32: clear },
         };
-        device.cmd_set_viewport(cmd, 0, std::slice::from_ref(&viewport));
-        device.cmd_set_scissor(cmd, 0, std::slice::from_ref(&render_area));
-        if let Some(tp) = triangle {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, tp.pipeline);
-            let push = TrianglePush {
-                tint: [1.0, 1.0, 1.0, 1.0],
+        let attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(view)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(clear_value);
+        let render_area = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        };
+        let rendering = vk::RenderingInfo::default()
+            .render_area(render_area)
+            .layer_count(1)
+            .color_attachments(std::slice::from_ref(&attachment));
+        unsafe {
+            device.cmd_begin_rendering(cmd, &rendering);
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent.width as f32,
+                height: extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
             };
-            device.cmd_push_constants(
-                cmd,
-                tp.layout,
-                vk::ShaderStageFlags::VERTEX,
-                0,
-                bytemuck::bytes_of(&push),
-            );
-            device.cmd_draw(cmd, 3, 1, 0, 0);
+            device.cmd_set_viewport(cmd, 0, std::slice::from_ref(&viewport));
+            device.cmd_set_scissor(cmd, 0, std::slice::from_ref(&render_area));
+            if let Some(tp) = triangle {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, tp.pipeline);
+                let push = TrianglePush {
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                };
+                device.cmd_push_constants(
+                    cmd,
+                    tp.layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+                device.cmd_draw(cmd, 3, 1, 0, 0);
+            }
+            device.cmd_end_rendering(cmd);
         }
-        device.cmd_end_rendering(cmd);
     }
 
     image_barrier(
         device,
         cmd,
         image,
+        vk::ImageAspectFlags::COLOR,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         vk::ImageLayout::PRESENT_SRC_KHR,
         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -371,6 +446,7 @@ fn image_barrier(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     image: vk::Image,
+    aspect: vk::ImageAspectFlags,
     old: vk::ImageLayout,
     new: vk::ImageLayout,
     src_stage: vk::PipelineStageFlags,
@@ -388,7 +464,7 @@ fn image_barrier(
         .image(image)
         .subresource_range(
             vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .aspect_mask(aspect)
                 .base_mip_level(0)
                 .level_count(1)
                 .base_array_layer(0)
@@ -411,6 +487,12 @@ impl Drop for AppGfx {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.raw.device_wait_idle();
+            if let Some(d) = self.depth.take() {
+                d.destroy(&self.device);
+            }
+            if let Some(w) = self.world.take() {
+                w.destroy(&self.device);
+            }
             if let Some(tp) = self.triangle.take() {
                 tp.destroy(&self.device.raw);
             }

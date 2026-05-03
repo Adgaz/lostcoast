@@ -1,13 +1,18 @@
 use anyhow::{Context, Result};
 use gfx::AppGfx;
+use glam::Vec3;
 use lostcoast_core::scene::Scene;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::path::PathBuf;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::keyboard::PhysicalKey;
+use winit::window::{CursorGrabMode, Window, WindowId};
+
+mod input;
+use input::FlyCam;
 
 fn parse_args() -> PathBuf {
     let mut args = std::env::args().skip(1);
@@ -38,16 +43,45 @@ struct App {
     scene: Scene,
     window: Option<Window>,
     gfx: Option<AppGfx>,
+    cam: FlyCam,
     start: Instant,
+    last_frame: Instant,
+    cursor_grabbed: bool,
 }
 
 impl App {
     fn new(scene: Scene) -> Self {
+        let cam = FlyCam::new(Vec3::new(3.0, 3.0, 3.0), Vec3::ZERO);
+        let now = Instant::now();
         Self {
             scene,
             window: None,
             gfx: None,
-            start: Instant::now(),
+            cam,
+            start: now,
+            last_frame: now,
+            cursor_grabbed: false,
+        }
+    }
+
+    fn try_grab_cursor(&mut self) {
+        if let Some(w) = &self.window {
+            let modes = [CursorGrabMode::Locked, CursorGrabMode::Confined];
+            for m in modes {
+                if w.set_cursor_grab(m).is_ok() {
+                    w.set_cursor_visible(false);
+                    self.cursor_grabbed = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn release_cursor(&mut self) {
+        if let Some(w) = &self.window {
+            let _ = w.set_cursor_grab(CursorGrabMode::None);
+            w.set_cursor_visible(true);
+            self.cursor_grabbed = false;
         }
     }
 }
@@ -104,8 +138,43 @@ impl ApplicationHandler for App {
                     g.resize(size.width.max(1), size.height.max(1));
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } if !self.cursor_grabbed => {
+                self.try_grab_cursor();
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key,
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                let pressed = state == ElementState::Pressed;
+                if let PhysicalKey::Code(code) = physical_key {
+                    let name = format!("{code:?}");
+                    if pressed && code == winit::keyboard::KeyCode::Escape {
+                        if self.cursor_grabbed {
+                            self.release_cursor();
+                        } else {
+                            event_loop.exit();
+                        }
+                    } else {
+                        self.cam.on_key(&name, pressed);
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
+                let now = Instant::now();
+                let dt = now.duration_since(self.last_frame).as_secs_f32();
+                self.last_frame = now;
+                self.cam.update(dt);
                 if let Some(g) = self.gfx.as_mut() {
+                    g.camera_pos = self.cam.pos;
+                    g.camera_target = self.cam.target();
                     let t = self.start.elapsed().as_secs_f32();
                     if let Err(e) = g.render(&self.scene, t) {
                         eprintln!("render: {e:#}");
@@ -117,6 +186,19 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if self.cursor_grabbed {
+                self.cam.on_mouse(delta.0 as f32, delta.1 as f32);
+            }
         }
     }
 }

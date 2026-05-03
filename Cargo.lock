@@ -125,6 +125,7 @@ dependencies = [
  "anyhow",
  "assets",
  "gfx",
+ "glam",
  "lostcoast-core",
  "raw-window-handle",
  "renderer",

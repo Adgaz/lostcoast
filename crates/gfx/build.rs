@@ -10,6 +10,8 @@ fn main() {
     let targets = [
         ("triangle.vert", shaderc::ShaderKind::Vertex),
         ("triangle.frag", shaderc::ShaderKind::Fragment),
+        ("world.vert", shaderc::ShaderKind::Vertex),
+        ("world.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (name, kind) in targets {

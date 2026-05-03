@@ -1,11 +1,18 @@
 pub mod app_gfx;
+pub mod buffer;
+pub mod camera;
+pub mod descriptor;
 pub mod device;
 pub mod instance;
+pub mod mesh;
 pub mod offscreen;
 pub mod pipeline;
 pub mod shader;
 pub mod swapchain;
 pub mod sync;
+pub mod texture;
+pub mod world_pass;
+pub mod world_pipeline;
 
 pub use app_gfx::AppGfx;
 pub use offscreen::render_offscreen;
