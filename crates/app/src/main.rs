@@ -127,6 +127,7 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        window.request_redraw();
         self.window = Some(window);
     }
 
