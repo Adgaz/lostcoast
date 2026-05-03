@@ -12,3 +12,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 bytemuck = { workspace = true }
 raw-window-handle = { workspace = true }
+ash = { workspace = true }
+ash-window = { workspace = true }
+gpu-allocator = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+shaderc = { workspace = true }

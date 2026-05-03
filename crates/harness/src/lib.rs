@@ -5,14 +5,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub fn render_scene(
-    _scene_path: &Path,
-    _camera: [f32; 3],
-    _look_at: [f32; 3],
-    _size: (u32, u32),
+    scene_path: &Path,
+    camera: [f32; 3],
+    look_at: [f32; 3],
+    size: (u32, u32),
 ) -> Result<RgbaImage> {
-    Err(anyhow!(
-        "render_scene not wired yet; gfx::render_offscreen needed (stage 1+)"
-    ))
+    let scene = assets::sidecar::load_scene(scene_path)?;
+    gfx::render_offscreen(&scene, camera, look_at, size)
 }
 
 #[derive(Debug, Deserialize, Clone)]

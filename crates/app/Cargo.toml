@@ -16,3 +16,5 @@ renderer = { path = "../renderer" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+winit = { workspace = true }
+raw-window-handle = { workspace = true }
