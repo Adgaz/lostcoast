@@ -5,6 +5,7 @@ use lostcoast_core::scene::Scene;
 
 use crate::device::{create_headless, find_memory_type, Device};
 use crate::instance::{create as create_instance, Instance, InstanceConfig};
+use crate::pipeline::{TrianglePipeline, TrianglePush};
 
 const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 
@@ -46,11 +47,7 @@ fn render(
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
-                | vk::ImageUsageFlags::TRANSFER_SRC
-                | vk::ImageUsageFlags::TRANSFER_DST,
-        )
+        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
     let color_image =
@@ -69,6 +66,21 @@ fn render(
         .context("allocate offscreen image memory")?;
     unsafe { device.raw.bind_image_memory(color_image, color_mem, 0) }
         .context("bind image memory")?;
+
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(color_image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(COLOR_FORMAT)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .base_mip_level(0)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1),
+        );
+    let color_view = unsafe { device.raw.create_image_view(&view_info, None) }
+        .context("create offscreen image view")?;
 
     let pixel_count = (width as u64) * (height as u64);
     let buf_size = pixel_count * 4;
@@ -92,6 +104,13 @@ fn render(
     unsafe { device.raw.bind_buffer_memory(read_buf, buf_mem, 0) }
         .context("bind readback buffer memory")?;
 
+    let triangle = match scene {
+        Scene::Triangle { .. } | Scene::Cube { .. } => {
+            Some(TrianglePipeline::new(&device.raw, COLOR_FORMAT)?)
+        }
+        Scene::Clear { .. } => None,
+    };
+
     let pool_info = vk::CommandPoolCreateInfo::default()
         .queue_family_index(device.queue_family)
         .flags(vk::CommandPoolCreateFlags::TRANSIENT);
@@ -108,40 +127,88 @@ fn render(
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe { device.raw.begin_command_buffer(cmd, &begin) }.context("begin command buffer")?;
 
-    transition(
+    image_barrier(
         &device.raw,
         cmd,
         color_image,
         vk::ImageLayout::UNDEFINED,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        vk::PipelineStageFlags::TOP_OF_PIPE,
+        vk::AccessFlags::empty(),
+        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
     );
 
     let cc = scene.clear_color();
-    let clear = vk::ClearColorValue {
-        float32: [cc[0], cc[1], cc[2], 1.0],
+    let clear_value = vk::ClearValue {
+        color: vk::ClearColorValue {
+            float32: [cc[0], cc[1], cc[2], 1.0],
+        },
     };
-    let range = vk::ImageSubresourceRange::default()
-        .aspect_mask(vk::ImageAspectFlags::COLOR)
-        .base_mip_level(0)
-        .level_count(1)
-        .base_array_layer(0)
-        .layer_count(1);
+    let color_attachment = vk::RenderingAttachmentInfo::default()
+        .image_view(color_view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(clear_value);
+
+    let render_area = vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent: vk::Extent2D { width, height },
+    };
+    let rendering = vk::RenderingInfo::default()
+        .render_area(render_area)
+        .layer_count(1)
+        .color_attachments(std::slice::from_ref(&color_attachment));
+
     unsafe {
-        device.raw.cmd_clear_color_image(
-            cmd,
-            color_image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &clear,
-            std::slice::from_ref(&range),
-        );
+        device.raw.cmd_begin_rendering(cmd, &rendering);
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = render_area;
+        device
+            .raw
+            .cmd_set_viewport(cmd, 0, std::slice::from_ref(&viewport));
+        device
+            .raw
+            .cmd_set_scissor(cmd, 0, std::slice::from_ref(&scissor));
+
+        if let Some(tp) = &triangle {
+            device
+                .raw
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, tp.pipeline);
+            let push = TrianglePush {
+                tint: [1.0, 1.0, 1.0, 1.0],
+            };
+            device.raw.cmd_push_constants(
+                cmd,
+                tp.layout,
+                vk::ShaderStageFlags::VERTEX,
+                0,
+                bytemuck::bytes_of(&push),
+            );
+            device.raw.cmd_draw(cmd, 3, 1, 0, 0);
+        }
+
+        device.raw.cmd_end_rendering(cmd);
     }
 
-    transition(
+    image_barrier(
         &device.raw,
         cmd,
         color_image,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        vk::PipelineStageFlags::TRANSFER,
+        vk::AccessFlags::TRANSFER_READ,
     );
 
     let copy = vk::BufferImageCopy::default()
@@ -202,8 +269,12 @@ fn render(
     unsafe {
         device.raw.destroy_fence(fence, None);
         device.raw.destroy_command_pool(pool, None);
+        if let Some(tp) = triangle {
+            tp.destroy(&device.raw);
+        }
         device.raw.destroy_buffer(read_buf, None);
         device.raw.free_memory(buf_mem, None);
+        device.raw.destroy_image_view(color_view, None);
         device.raw.destroy_image(color_image, None);
         device.raw.free_memory(color_mem, None);
     }
@@ -211,15 +282,18 @@ fn render(
     Ok(img)
 }
 
-fn transition(
+#[allow(clippy::too_many_arguments)]
+fn image_barrier(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     image: vk::Image,
     old: vk::ImageLayout,
     new: vk::ImageLayout,
+    src_stage: vk::PipelineStageFlags,
+    src_access: vk::AccessFlags,
+    dst_stage: vk::PipelineStageFlags,
+    dst_access: vk::AccessFlags,
 ) {
-    let (src_stage, src_access) = stage_for(old, true);
-    let (dst_stage, dst_access) = stage_for(new, false);
     let barrier = vk::ImageMemoryBarrier::default()
         .src_access_mask(src_access)
         .dst_access_mask(dst_access)
@@ -246,43 +320,5 @@ fn transition(
             &[],
             std::slice::from_ref(&barrier),
         );
-    }
-}
-
-fn stage_for(layout: vk::ImageLayout, src: bool) -> (vk::PipelineStageFlags, vk::AccessFlags) {
-    match layout {
-        vk::ImageLayout::UNDEFINED => (
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::AccessFlags::empty(),
-        ),
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
-            vk::PipelineStageFlags::TRANSFER,
-            vk::AccessFlags::TRANSFER_WRITE,
-        ),
-        vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
-            vk::PipelineStageFlags::TRANSFER,
-            vk::AccessFlags::TRANSFER_READ,
-        ),
-        vk::ImageLayout::PRESENT_SRC_KHR => {
-            if src {
-                (
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::AccessFlags::empty(),
-                )
-            } else {
-                (
-                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                    vk::AccessFlags::empty(),
-                )
-            }
-        }
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        ),
-        _ => (
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
-        ),
     }
 }

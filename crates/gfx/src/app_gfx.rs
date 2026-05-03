@@ -5,6 +5,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::device::{create_for_surface, Device};
 use crate::instance::{create as create_instance, Instance, InstanceConfig};
+use crate::pipeline::{TrianglePipeline, TrianglePush};
 use crate::swapchain::{self, Swapchain};
 use crate::sync::{create_frame_sync, destroy_frame_sync, FrameSync};
 
@@ -20,6 +21,8 @@ pub struct AppGfx {
     cmd_bufs: Vec<vk::CommandBuffer>,
     frame_syncs: Vec<FrameSync>,
     image_render_done: Vec<vk::Semaphore>,
+    triangle: Option<TrianglePipeline>,
+    triangle_format: vk::Format,
     frame_idx: usize,
     extent: (u32, u32),
 }
@@ -92,6 +95,8 @@ impl AppGfx {
             image_render_done.push(sem);
         }
 
+        let triangle_format = swapchain.format;
+
         Ok(AppGfx {
             instance,
             surface_loader,
@@ -102,6 +107,8 @@ impl AppGfx {
             cmd_bufs,
             frame_syncs,
             image_render_done,
+            triangle: None,
+            triangle_format,
             frame_idx: 0,
             extent: size,
         })
@@ -141,26 +148,48 @@ impl AppGfx {
             .context("create render-done semaphore")?;
             self.image_render_done.push(sem);
         }
+        if new.format != self.triangle_format {
+            if let Some(tp) = self.triangle.take() {
+                tp.destroy(&self.device.raw);
+            }
+            self.triangle_format = new.format;
+        }
         self.swapchain = Some(new);
         Ok(())
     }
 
+    fn ensure_pipeline(&mut self, scene: &Scene) -> Result<()> {
+        let needs = matches!(scene, Scene::Triangle { .. } | Scene::Cube { .. });
+        if needs && self.triangle.is_none() {
+            self.triangle = Some(TrianglePipeline::new(
+                &self.device.raw,
+                self.triangle_format,
+            )?);
+        }
+        Ok(())
+    }
+
     pub fn render(&mut self, scene: &Scene, t: f32) -> Result<()> {
+        self.ensure_pipeline(scene)?;
+
         let frame = self.frame_idx % FRAMES_IN_FLIGHT;
-        let sync = &self.frame_syncs[frame];
+        let in_flight = self.frame_syncs[frame].in_flight;
+        let image_available = self.frame_syncs[frame].image_available;
         let cmd = self.cmd_bufs[frame];
 
         unsafe {
             self.device
                 .raw
-                .wait_for_fences(std::slice::from_ref(&sync.in_flight), true, u64::MAX)
+                .wait_for_fences(std::slice::from_ref(&in_flight), true, u64::MAX)
                 .context("wait fence")?;
         }
 
-        let sc = self.swapchain.as_ref().unwrap();
-        let acquire = unsafe {
-            sc.loader
-                .acquire_next_image(sc.raw, u64::MAX, sync.image_available, vk::Fence::null())
+        let acquire = {
+            let sc = self.swapchain.as_ref().unwrap();
+            unsafe {
+                sc.loader
+                    .acquire_next_image(sc.raw, u64::MAX, image_available, vk::Fence::null())
+            }
         };
         let image_idx = match acquire {
             Ok((idx, _)) => idx as usize,
@@ -174,7 +203,7 @@ impl AppGfx {
         unsafe {
             self.device
                 .raw
-                .reset_fences(std::slice::from_ref(&sync.in_flight))
+                .reset_fences(std::slice::from_ref(&in_flight))
                 .context("reset fence")?;
             self.device
                 .raw
@@ -187,37 +216,51 @@ impl AppGfx {
         unsafe { self.device.raw.begin_command_buffer(cmd, &begin) }
             .context("begin command buffer")?;
 
-        let image = sc.images[image_idx];
-
-        record_clear(&self.device.raw, cmd, image, cycled_color(scene, t));
+        let (image, view, extent) = {
+            let sc = self.swapchain.as_ref().unwrap();
+            (sc.images[image_idx], sc.image_views[image_idx], sc.extent)
+        };
+        let color = cycled_color(scene, t);
+        record_pass(
+            &self.device.raw,
+            cmd,
+            image,
+            view,
+            extent,
+            color,
+            self.triangle.as_ref(),
+        );
 
         unsafe { self.device.raw.end_command_buffer(cmd) }.context("end command buffer")?;
 
         let render_done = self.image_render_done[image_idx];
-        let wait_stages = [vk::PipelineStageFlags::TRANSFER];
+        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let submit = vk::SubmitInfo::default()
-            .wait_semaphores(std::slice::from_ref(&sync.image_available))
+            .wait_semaphores(std::slice::from_ref(&image_available))
             .wait_dst_stage_mask(&wait_stages)
             .command_buffers(std::slice::from_ref(&cmd))
             .signal_semaphores(std::slice::from_ref(&render_done));
         unsafe {
             self.device
                 .raw
-                .queue_submit(
-                    self.device.queue,
-                    std::slice::from_ref(&submit),
-                    sync.in_flight,
-                )
+                .queue_submit(self.device.queue, std::slice::from_ref(&submit), in_flight)
                 .context("queue submit")?;
         }
 
+        let sc_handle = self.swapchain.as_ref().unwrap().raw;
         let image_indices = [image_idx as u32];
-        let swapchains = [sc.raw];
+        let swapchains = [sc_handle];
         let present = vk::PresentInfoKHR::default()
             .wait_semaphores(std::slice::from_ref(&render_done))
             .swapchains(&swapchains)
             .image_indices(&image_indices);
-        let result = unsafe { sc.loader.queue_present(self.device.queue, &present) };
+        let result = unsafe {
+            self.swapchain
+                .as_ref()
+                .unwrap()
+                .loader
+                .queue_present(self.device.queue, &present)
+        };
         match result {
             Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) => {}
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -242,44 +285,82 @@ fn cycled_color(scene: &Scene, t: f32) -> [f32; 4] {
     ]
 }
 
-fn record_clear(device: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, color: [f32; 4]) {
+fn record_pass(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    image: vk::Image,
+    view: vk::ImageView,
+    extent: vk::Extent2D,
+    clear: [f32; 4],
+    triangle: Option<&TrianglePipeline>,
+) {
     image_barrier(
         device,
         cmd,
         image,
         vk::ImageLayout::UNDEFINED,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         vk::PipelineStageFlags::TOP_OF_PIPE,
         vk::AccessFlags::empty(),
-        vk::PipelineStageFlags::TRANSFER,
-        vk::AccessFlags::TRANSFER_WRITE,
+        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
     );
 
-    let cv = vk::ClearColorValue { float32: color };
-    let range = vk::ImageSubresourceRange::default()
-        .aspect_mask(vk::ImageAspectFlags::COLOR)
-        .base_mip_level(0)
-        .level_count(1)
-        .base_array_layer(0)
-        .layer_count(1);
+    let clear_value = vk::ClearValue {
+        color: vk::ClearColorValue { float32: clear },
+    };
+    let attachment = vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(clear_value);
+    let render_area = vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent,
+    };
+    let rendering = vk::RenderingInfo::default()
+        .render_area(render_area)
+        .layer_count(1)
+        .color_attachments(std::slice::from_ref(&attachment));
+
     unsafe {
-        device.cmd_clear_color_image(
-            cmd,
-            image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &cv,
-            std::slice::from_ref(&range),
-        );
+        device.cmd_begin_rendering(cmd, &rendering);
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        device.cmd_set_viewport(cmd, 0, std::slice::from_ref(&viewport));
+        device.cmd_set_scissor(cmd, 0, std::slice::from_ref(&render_area));
+        if let Some(tp) = triangle {
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, tp.pipeline);
+            let push = TrianglePush {
+                tint: [1.0, 1.0, 1.0, 1.0],
+            };
+            device.cmd_push_constants(
+                cmd,
+                tp.layout,
+                vk::ShaderStageFlags::VERTEX,
+                0,
+                bytemuck::bytes_of(&push),
+            );
+            device.cmd_draw(cmd, 3, 1, 0, 0);
+        }
+        device.cmd_end_rendering(cmd);
     }
 
     image_barrier(
         device,
         cmd,
         image,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         vk::ImageLayout::PRESENT_SRC_KHR,
-        vk::PipelineStageFlags::TRANSFER,
-        vk::AccessFlags::TRANSFER_WRITE,
+        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
         vk::AccessFlags::empty(),
     );
@@ -330,6 +411,9 @@ impl Drop for AppGfx {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.raw.device_wait_idle();
+            if let Some(tp) = self.triangle.take() {
+                tp.destroy(&self.device.raw);
+            }
             for sem in self.image_render_done.drain(..) {
                 self.device.raw.destroy_semaphore(sem, None);
             }
