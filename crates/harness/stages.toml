@@ -1,0 +1,141 @@
+# per-stage gate config. loop.sh reads this via `cargo run -p harness --bin stages -- get <id> <field>`.
+# numerical_tests is passed to `cargo test --workspace -- <filter>`. one space-separated word per filter.
+# visual_gate=true means render_ref + diff against the reference png.
+# human_review_required=true means loop halts after a green run for your eye.
+
+[stage.1]
+bin = "app"
+scene = "assets/scenes/clear.json"
+camera = [0.0, 1.5, 3.0]
+look_at = [0.0, 0.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-01.png"
+visual_gate = true
+numerical_tests = []
+human_review_required = false
+
+[stage.2]
+bin = "app"
+scene = "assets/scenes/triangle.json"
+camera = [0.0, 0.0, 2.0]
+look_at = [0.0, 0.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-02.png"
+visual_gate = true
+numerical_tests = []
+human_review_required = false
+
+[stage.3]
+bin = "app"
+scene = "assets/scenes/cube.json"
+camera = [3.0, 3.0, 3.0]
+look_at = [0.0, 0.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-03.png"
+visual_gate = true
+numerical_tests = []
+human_review_required = false
+
+[stage.4]
+bin = "app"
+scene = "assets/scenes/sponza_lite.json"
+camera = [4.0, 2.0, 0.0]
+look_at = [0.0, 1.5, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-04.png"
+visual_gate = true
+numerical_tests = []
+human_review_required = false
+
+[stage.5]
+bin = "app"
+scene = "assets/scenes/wall_normalmap.json"
+camera = [0.0, 1.0, 3.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-05.png"
+visual_gate = true
+numerical_tests = ["half_lambert::table_matches"]
+human_review_required = false
+
+[stage.6]
+bin = "lightbaker"
+scene = "assets/scenes/cornell_one_light.json"
+camera = [0.0, 1.0, 3.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-06.png"
+visual_gate = true
+numerical_tests = ["direct::point_light_floor"]
+human_review_required = true
+review_note = "floor luxel below light should match Li/pi*V; verify shadow boundaries are not jagged"
+
+[stage.7]
+bin = "lightbaker"
+scene = "assets/scenes/closed_box.json"
+camera = [0.0, 1.0, 3.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-07.png"
+visual_gate = false
+numerical_tests = ["energy::closed_box_within_1pct"]
+human_review_required = true
+review_note = "energy test is necessary not sufficient; spot-check that color bleeding looks like radiosity not blur"
+
+[stage.8]
+bin = "lightbaker"
+scene = "assets/scenes/rnm_flat_plane.json"
+camera = [0.0, 1.0, 3.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-08.png"
+visual_gate = true
+numerical_tests = ["rnm::flat_plane_three_equal"]
+human_review_required = true
+review_note = "all three lightmaps should be visually identical for a flat plane under overhead light"
+
+[stage.9]
+bin = "app"
+scene = "assets/scenes/ambient_cube_test.json"
+camera = [0.0, 1.0, 3.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-09.png"
+visual_gate = true
+numerical_tests = ["ambient_cube::n2_axes"]
+human_review_required = false
+
+[stage.10]
+bin = "app"
+scene = "assets/scenes/hdr_step.json"
+camera = [0.0, 1.0, 3.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-10.png"
+visual_gate = true
+numerical_tests = ["hdr::histogram_converges_within_30_frames"]
+human_review_required = true
+review_note = "bloom should not bleed across hard edges; tonemap should not crush near-black"
+
+[stage.11]
+bin = "app"
+scene = "assets/scenes/parallax_room.json"
+camera = [2.0, 1.5, 2.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-11.png"
+visual_gate = true
+numerical_tests = ["cubemap::parallax_landing"]
+human_review_required = true
+review_note = "ceiling-light reflection should land at same screen point as the source; sweep camera to confirm"
+
+[stage.12]
+bin = "app"
+scene = "assets/scenes/phong_sphere.json"
+camera = [0.0, 1.0, 3.0]
+look_at = [0.0, 1.0, 0.0]
+size = [1280, 720]
+reference = "crates/harness/references/stage-12.png"
+visual_gate = true
+numerical_tests = ["phong::specular_aligns"]
+human_review_required = false

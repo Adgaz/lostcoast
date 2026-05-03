@@ -1,0 +1,13 @@
+[package]
+name = "renderer"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lostcoast-core = { path = "../core" }
+assets = { path = "../assets" }
+gfx = { path = "../gfx" }
+glam = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

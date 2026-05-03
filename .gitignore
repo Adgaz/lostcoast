@@ -1,0 +1,36 @@
+target/
+**/*.rs.bk
+
+# planning + AI config, local only
+docs/
+CLAUDE.md
+
+# bake outputs
+*.bake
+*.bake.json
+*.scene.baked
+
+# RenderDoc captures
+*.rdc
+*.cap
+
+# harness intermediates (references/ stays tracked)
+crates/harness/captures/
+**/*.tmp.png
+**/*.actual.png
+**/*.validation.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# local env
+.env
+.env.local

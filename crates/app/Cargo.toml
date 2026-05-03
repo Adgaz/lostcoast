@@ -1,0 +1,18 @@
+[package]
+name = "app"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[dependencies]
+lostcoast-core = { path = "../core" }
+assets = { path = "../assets" }
+gfx = { path = "../gfx" }
+renderer = { path = "../renderer" }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

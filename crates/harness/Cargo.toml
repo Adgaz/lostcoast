@@ -1,0 +1,32 @@
+[package]
+name = "harness"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "render_ref"
+path = "src/bin/render_ref.rs"
+
+[[bin]]
+name = "diff"
+path = "src/bin/diff.rs"
+
+[[bin]]
+name = "stages"
+path = "src/bin/stages.rs"
+
+[dependencies]
+lostcoast-core = { path = "../core" }
+gfx = { path = "../gfx" }
+assets = { path = "../assets" }
+renderer = { path = "../renderer" }
+glam = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"

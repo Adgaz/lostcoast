@@ -1,0 +1,13 @@
+[package]
+name = "assets"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lostcoast-core = { path = "../core" }
+glam = { workspace = true }
+gltf = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "lostcoast-core"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+bytemuck = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "lightbaker"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lightbaker"
+path = "src/main.rs"
+
+[dependencies]
+lostcoast-core = { path = "../core" }
+assets = { path = "../assets" }
+glam = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
