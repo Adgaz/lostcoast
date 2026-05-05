@@ -5,8 +5,10 @@ use lostcoast_core::scene::Scene;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::camera::{perspective, view};
+use crate::cornell::CornellResources;
 use crate::device::{create_for_surface, Device};
 use crate::instance::{create as create_instance, Instance, InstanceConfig};
+use crate::overlay::{Overlay, OverlayDraw};
 use crate::pipeline::{TrianglePipeline, TrianglePush};
 use crate::swapchain::{self, Swapchain};
 use crate::sync::{create_frame_sync, destroy_frame_sync, FrameSync};
@@ -16,10 +18,6 @@ const FRAMES_IN_FLIGHT: usize = 2;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 pub struct AppGfx {
-    instance: Instance,
-    surface_loader: ash::khr::surface::Instance,
-    surface: vk::SurfaceKHR,
-    device: Device,
     swapchain: Option<Swapchain>,
     cmd_pool: vk::CommandPool,
     cmd_bufs: Vec<vk::CommandBuffer>,
@@ -27,12 +25,18 @@ pub struct AppGfx {
     image_render_done: Vec<vk::Semaphore>,
     triangle: Option<TrianglePipeline>,
     world: Option<WorldResources>,
+    cornell: Option<CornellResources>,
+    overlay: Option<Overlay>,
     depth: Option<DepthTarget>,
     pipeline_format: vk::Format,
     frame_idx: usize,
     extent: (u32, u32),
     pub camera_pos: Vec3,
     pub camera_target: Vec3,
+    device: Device,
+    surface: vk::SurfaceKHR,
+    surface_loader: ash::khr::surface::Instance,
+    instance: Instance,
 }
 
 impl AppGfx {
@@ -117,6 +121,8 @@ impl AppGfx {
             image_render_done,
             triangle: None,
             world: None,
+            cornell: None,
+            overlay: None,
             depth: None,
             pipeline_format,
             frame_idx: 0,
@@ -167,6 +173,10 @@ impl AppGfx {
             if let Some(w) = self.world.take() {
                 w.destroy(&self.device);
             }
+            if let Some(c) = self.cornell.take() {
+                c.destroy(&self.device);
+            }
+            self.overlay = None;
             self.pipeline_format = new.format;
         }
         if let Some(d) = self.depth.take() {
@@ -204,12 +214,35 @@ impl AppGfx {
                     )?);
                 }
             }
+            Scene::Cornell { .. } => {
+                if self.cornell.is_none() {
+                    self.cornell = Some(CornellResources::create(
+                        &self.device,
+                        self.cmd_pool,
+                        self.pipeline_format,
+                        DEPTH_FORMAT,
+                        FRAMES_IN_FLIGHT as u32,
+                    )?);
+                }
+                if self.depth.is_none() {
+                    self.depth = Some(DepthTarget::create(
+                        &self.device,
+                        self.extent.0,
+                        self.extent.1,
+                    )?);
+                }
+            }
             Scene::Clear { .. } => {}
         }
         Ok(())
     }
 
-    pub fn render(&mut self, scene: &Scene, t: f32) -> Result<()> {
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        t: f32,
+        overlay_data: Option<OverlayDraw>,
+    ) -> Result<()> {
         self.ensure_resources(scene)?;
 
         let frame = self.frame_idx % FRAMES_IN_FLIGHT;
@@ -257,6 +290,11 @@ impl AppGfx {
             let model = Mat4::from_rotation_y(t * 0.5);
             w.update_globals(&self.device, frame, view_proj, model)?;
         }
+        if let Some(c) = &self.cornell {
+            let aspect = self.extent.0 as f32 / self.extent.1.max(1) as f32;
+            let view_proj = perspective(aspect) * view(self.camera_pos, self.camera_target);
+            c.update_globals(&self.device, frame, view_proj)?;
+        }
 
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -277,9 +315,34 @@ impl AppGfx {
             cycled,
             self.triangle.as_ref(),
             self.world.as_ref(),
+            self.cornell.as_ref(),
             self.depth.as_ref(),
             frame,
         );
+
+        if let Some(draw) = overlay_data {
+            if self.overlay.is_none() {
+                self.overlay = Some(Overlay::new(
+                    &self.instance,
+                    &self.device,
+                    self.pipeline_format,
+                    FRAMES_IN_FLIGHT,
+                )?);
+            }
+            let overlay = self.overlay.as_mut().unwrap();
+            overlay.upload_textures(&self.device, self.cmd_pool, &draw.textures_delta)?;
+            overlay.record(
+                &self.device.raw,
+                cmd,
+                view,
+                extent,
+                draw.pixels_per_point,
+                &draw.primitives,
+            )?;
+            overlay.free_textures(&draw.textures_delta)?;
+        }
+
+        barrier_to_present(&self.device.raw, cmd, image);
 
         unsafe { self.device.raw.end_command_buffer(cmd) }.context("end command buffer")?;
 
@@ -345,6 +408,7 @@ fn record_pass(
     clear: [f32; 4],
     triangle: Option<&TrianglePipeline>,
     world: Option<&WorldResources>,
+    cornell: Option<&CornellResources>,
     depth: Option<&DepthTarget>,
     frame_idx: usize,
 ) {
@@ -377,7 +441,9 @@ fn record_pass(
         );
     }
 
-    if let (Some(w), Some(d)) = (world, depth) {
+    if let (Some(c), Some(d)) = (cornell, depth) {
+        c.record_pass(device, cmd, view, d.view, extent, frame_idx);
+    } else if let (Some(w), Some(d)) = (world, depth) {
         w.record_pass(device, cmd, view, d.view, extent, clear, frame_idx);
     } else {
         let clear_value = vk::ClearValue {
@@ -426,7 +492,9 @@ fn record_pass(
             device.cmd_end_rendering(cmd);
         }
     }
+}
 
+fn barrier_to_present(device: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image) {
     image_barrier(
         device,
         cmd,
@@ -493,6 +561,10 @@ impl Drop for AppGfx {
             if let Some(w) = self.world.take() {
                 w.destroy(&self.device);
             }
+            if let Some(c) = self.cornell.take() {
+                c.destroy(&self.device);
+            }
+            self.overlay = None;
             if let Some(tp) = self.triangle.take() {
                 tp.destroy(&self.device.raw);
             }

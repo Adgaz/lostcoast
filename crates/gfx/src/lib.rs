@@ -1,11 +1,13 @@
 pub mod app_gfx;
 pub mod buffer;
 pub mod camera;
+pub mod cornell;
 pub mod descriptor;
 pub mod device;
 pub mod instance;
 pub mod mesh;
 pub mod offscreen;
+pub mod overlay;
 pub mod pipeline;
 pub mod shader;
 pub mod swapchain;

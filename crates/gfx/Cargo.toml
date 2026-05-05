@@ -16,6 +16,8 @@ ash = { workspace = true }
 ash-window = { workspace = true }
 gpu-allocator = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
+egui = { workspace = true }
+egui-ash-renderer = { workspace = true }
 
 [build-dependencies]
 shaderc = { workspace = true }

@@ -12,6 +12,8 @@ fn main() {
         ("triangle.frag", shaderc::ShaderKind::Fragment),
         ("world.vert", shaderc::ShaderKind::Vertex),
         ("world.frag", shaderc::ShaderKind::Fragment),
+        ("cornell.vert", shaderc::ShaderKind::Vertex),
+        ("cornell.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (name, kind) in targets {

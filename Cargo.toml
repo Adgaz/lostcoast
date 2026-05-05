@@ -35,6 +35,9 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "1"
 raw-window-handle = "0.6"
+egui = "0.31"
+egui-winit = { version = "0.31", default-features = false, features = ["links"] }
+egui-ash-renderer = { version = "0.8", features = ["dynamic-rendering"] }
 
 [profile.release]
 lto = "thin"

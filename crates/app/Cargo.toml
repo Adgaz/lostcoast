@@ -19,3 +19,5 @@ tracing-subscriber = { workspace = true }
 winit = { workspace = true }
 raw-window-handle = { workspace = true }
 glam = { workspace = true }
+egui = { workspace = true }
+egui-winit = { workspace = true }
